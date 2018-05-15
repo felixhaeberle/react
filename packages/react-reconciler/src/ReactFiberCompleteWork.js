@@ -11,13 +11,17 @@ import type {HostConfig} from 'react-reconciler';
 import type {Fiber} from './ReactFiber';
 import type {ExpirationTime} from './ReactFiberExpirationTime';
 import type {HostContext} from './ReactFiberHostContext';
+import type {LegacyContext} from './ReactFiberContext';
+import type {NewContext} from './ReactFiberNewContext';
 import type {HydrationContext} from './ReactFiberHydrationContext';
 import type {FiberRoot} from './ReactFiberRoot';
+import type {ProfilerTimer} from './ReactProfilerTimer';
 
 import {
   enableMutatingReconciler,
   enablePersistentReconciler,
   enableNoopReconciler,
+  enableProfilerTimer,
 } from 'shared/ReactFeatureFlags';
 import {
   IndeterminateComponent,
@@ -27,24 +31,24 @@ import {
   HostComponent,
   HostText,
   HostPortal,
-  CallComponent,
-  CallHandlerPhase,
-  ReturnComponent,
+  ContextProvider,
+  ContextConsumer,
+  ForwardRef,
   Fragment,
+  Mode,
+  Profiler,
+  TimeoutComponent,
 } from 'shared/ReactTypeOfWork';
 import {Placement, Ref, Update} from 'shared/ReactTypeOfSideEffect';
 import invariant from 'fbjs/lib/invariant';
 
-import {reconcileChildFibers} from './ReactChildFiber';
-import {
-  popContextProvider,
-  popTopLevelContextObject,
-} from './ReactFiberContext';
-
 export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
   config: HostConfig<T, P, I, TI, HI, PI, C, CC, CX, PL>,
   hostContext: HostContext<C, CX>,
+  legacyContext: LegacyContext,
+  newContext: NewContext,
   hydrationContext: HydrationContext<C, CX>,
+  profilerTimer: ProfilerTimer,
 ) {
   const {
     createInstance,
@@ -63,6 +67,15 @@ export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
     popHostContainer,
   } = hostContext;
 
+  const {recordElapsedActualRenderTime} = profilerTimer;
+
+  const {
+    popContextProvider: popLegacyContextProvider,
+    popTopLevelContextObject: popTopLevelLegacyContextObject,
+  } = legacyContext;
+
+  const {popProvider} = newContext;
+
   const {
     prepareToHydrateHostInstance,
     prepareToHydrateHostTextInstance,
@@ -71,81 +84,12 @@ export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
 
   function markUpdate(workInProgress: Fiber) {
     // Tag the fiber with an update effect. This turns a Placement into
-    // an UpdateAndPlacement.
+    // a PlacementAndUpdate.
     workInProgress.effectTag |= Update;
   }
 
   function markRef(workInProgress: Fiber) {
     workInProgress.effectTag |= Ref;
-  }
-
-  function appendAllReturns(returns: Array<mixed>, workInProgress: Fiber) {
-    let node = workInProgress.stateNode;
-    if (node) {
-      node.return = workInProgress;
-    }
-    while (node !== null) {
-      if (
-        node.tag === HostComponent ||
-        node.tag === HostText ||
-        node.tag === HostPortal
-      ) {
-        invariant(false, 'A call cannot have host component children.');
-      } else if (node.tag === ReturnComponent) {
-        returns.push(node.pendingProps.value);
-      } else if (node.child !== null) {
-        node.child.return = node;
-        node = node.child;
-        continue;
-      }
-      while (node.sibling === null) {
-        if (node.return === null || node.return === workInProgress) {
-          return;
-        }
-        node = node.return;
-      }
-      node.sibling.return = node.return;
-      node = node.sibling;
-    }
-  }
-
-  function moveCallToHandlerPhase(
-    current: Fiber | null,
-    workInProgress: Fiber,
-    renderExpirationTime: ExpirationTime,
-  ) {
-    const props = workInProgress.memoizedProps;
-    invariant(
-      props,
-      'Should be resolved by now. This error is likely caused by a bug in ' +
-        'React. Please file an issue.',
-    );
-
-    // First step of the call has completed. Now we need to do the second.
-    // TODO: It would be nice to have a multi stage call represented by a
-    // single component, or at least tail call optimize nested ones. Currently
-    // that requires additional fields that we don't want to add to the fiber.
-    // So this requires nested handlers.
-    // Note: This doesn't mutate the alternate node. I don't think it needs to
-    // since this stage is reset for every pass.
-    workInProgress.tag = CallHandlerPhase;
-
-    // Build up the returns.
-    // TODO: Compare this to a generator or opaque helpers like Children.
-    const returns: Array<mixed> = [];
-    appendAllReturns(returns, workInProgress);
-    const fn = props.handler;
-    const childProps = props.props;
-    const nextChildren = fn(childProps, returns);
-
-    const currentFirstChild = current !== null ? current.child : null;
-    workInProgress.child = reconcileChildFibers(
-      workInProgress,
-      currentFirstChild,
-      nextChildren,
-      renderExpirationTime,
-    );
-    return workInProgress.child;
   }
 
   function appendAllChildren(parent: I, workInProgress: Fiber) {
@@ -271,14 +215,12 @@ export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
         } else {
           const container = portalOrRoot.containerInfo;
           let newChildSet = createContainerChildSet(container);
-          if (finalizeContainerChildren(container, newChildSet)) {
-            markUpdate(workInProgress);
-          }
-          portalOrRoot.pendingChildren = newChildSet;
           // If children might have changed, we have to add them all to the set.
           appendAllChildrenToContainer(newChildSet, workInProgress);
+          portalOrRoot.pendingChildren = newChildSet;
           // Schedule an update on the container to swap out the container.
           markUpdate(workInProgress);
+          finalizeContainerChildren(container, newChildSet);
         }
       };
       updateHostComponent = function(
@@ -400,18 +342,17 @@ export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
         return null;
       case ClassComponent: {
         // We are leaving this subtree, so pop context if any.
-        popContextProvider(workInProgress);
+        popLegacyContextProvider(workInProgress);
         return null;
       }
       case HostRoot: {
         popHostContainer(workInProgress);
-        popTopLevelContextObject(workInProgress);
+        popTopLevelLegacyContextObject(workInProgress);
         const fiberRoot = (workInProgress.stateNode: FiberRoot);
         if (fiberRoot.pendingContext) {
           fiberRoot.context = fiberRoot.pendingContext;
           fiberRoot.pendingContext = null;
         }
-
         if (current === null || current.child === null) {
           // If we hydrated, pop so that we can delete any remaining children
           // that weren't hydrated.
@@ -437,6 +378,9 @@ export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
           // Even better would be if children weren't special cased at all tho.
           const instance: I = workInProgress.stateNode;
           const currentHostContext = getHostContext();
+          // TODO: Experiencing an error where oldProps is null. Suggests a host
+          // component is hitting the resume path. Figure out why. Possibly
+          // related to `hidden`.
           const updatePayload = prepareUpdate(
             instance,
             type,
@@ -561,24 +505,28 @@ export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
         }
         return null;
       }
-      case CallComponent:
-        return moveCallToHandlerPhase(
-          current,
-          workInProgress,
-          renderExpirationTime,
-        );
-      case CallHandlerPhase:
-        // Reset the tag to now be a first phase call.
-        workInProgress.tag = CallComponent;
+      case ForwardRef:
         return null;
-      case ReturnComponent:
-        // Does nothing.
+      case TimeoutComponent:
         return null;
       case Fragment:
+        return null;
+      case Mode:
+        return null;
+      case Profiler:
+        if (enableProfilerTimer) {
+          recordElapsedActualRenderTime(workInProgress);
+        }
         return null;
       case HostPortal:
         popHostContainer(workInProgress);
         updateHostContainer(workInProgress);
+        return null;
+      case ContextProvider:
+        // Pop provider fiber
+        popProvider(workInProgress);
+        return null;
+      case ContextConsumer:
         return null;
       // Error cases
       case IndeterminateComponent:

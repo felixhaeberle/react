@@ -7,6 +7,7 @@
  */
 
 import React from 'react';
+import {isForwardRef} from 'react-is';
 import describeComponentFrame from 'shared/describeComponentFrame';
 import getComponentName from 'shared/getComponentName';
 import emptyObject from 'fbjs/lib/emptyObject';
@@ -56,7 +57,7 @@ class ReactShallowRenderer {
       element.type,
     );
     invariant(
-      typeof element.type === 'function',
+      isForwardRef(element) || typeof element.type === 'function',
       'ReactShallowRenderer render(): Shallow rendering works only with custom ' +
         'components, but the provided element type was `%s`.',
       Array.isArray(element.type)
@@ -73,14 +74,18 @@ class ReactShallowRenderer {
     this._context = getMaskedContext(element.type.contextTypes, context);
 
     if (this._instance) {
-      this._updateClassComponent(element.type, element.props, this._context);
+      this._updateClassComponent(element, this._context);
     } else {
-      if (shouldConstruct(element.type)) {
+      if (isForwardRef(element)) {
+        this._rendered = element.type.render(element.props, element.ref);
+      } else if (shouldConstruct(element.type)) {
         this._instance = new element.type(
           element.props,
           this._context,
           this._updater,
         );
+
+        this._updateStateFromStaticLifecycle(element.props);
 
         if (element.type.hasOwnProperty('contextTypes')) {
           currentlyValidatingElement = element;
@@ -96,7 +101,7 @@ class ReactShallowRenderer {
           currentlyValidatingElement = null;
         }
 
-        this._mountClassComponent(element.props, this._context);
+        this._mountClassComponent(element, this._context);
       } else {
         this._rendered = element.type(element.props, this._context);
       }
@@ -122,16 +127,31 @@ class ReactShallowRenderer {
     this._instance = null;
   }
 
-  _mountClassComponent(props, context) {
+  _mountClassComponent(element, context) {
     this._instance.context = context;
-    this._instance.props = props;
+    this._instance.props = element.props;
     this._instance.state = this._instance.state || null;
     this._instance.updater = this._updater;
 
-    if (typeof this._instance.componentWillMount === 'function') {
+    if (
+      typeof this._instance.UNSAFE_componentWillMount === 'function' ||
+      typeof this._instance.componentWillMount === 'function'
+    ) {
       const beforeState = this._newState;
 
-      this._instance.componentWillMount();
+      // In order to support react-lifecycles-compat polyfilled components,
+      // Unsafe lifecycles should not be invoked for components using the new APIs.
+      if (
+        typeof element.type.getDerivedStateFromProps !== 'function' &&
+        typeof this._instance.getSnapshotBeforeUpdate !== 'function'
+      ) {
+        if (typeof this._instance.componentWillMount === 'function') {
+          this._instance.componentWillMount();
+        }
+        if (typeof this._instance.UNSAFE_componentWillMount === 'function') {
+          this._instance.UNSAFE_componentWillMount();
+        }
+      }
 
       // setState may have been called during cWM
       if (beforeState !== this._newState) {
@@ -144,16 +164,31 @@ class ReactShallowRenderer {
     // because DOM refs are not available.
   }
 
-  _updateClassComponent(type, props, context) {
+  _updateClassComponent(element, context) {
+    const {props, type} = element;
+
     const oldState = this._instance.state || emptyObject;
     const oldProps = this._instance.props;
 
-    if (
-      oldProps !== props &&
-      typeof this._instance.componentWillReceiveProps === 'function'
-    ) {
-      this._instance.componentWillReceiveProps(props, context);
+    if (oldProps !== props) {
+      // In order to support react-lifecycles-compat polyfilled components,
+      // Unsafe lifecycles should not be invoked for components using the new APIs.
+      if (
+        typeof element.type.getDerivedStateFromProps !== 'function' &&
+        typeof this._instance.getSnapshotBeforeUpdate !== 'function'
+      ) {
+        if (typeof this._instance.componentWillReceiveProps === 'function') {
+          this._instance.componentWillReceiveProps(props, context);
+        }
+        if (
+          typeof this._instance.UNSAFE_componentWillReceiveProps === 'function'
+        ) {
+          this._instance.UNSAFE_componentWillReceiveProps(props, context);
+        }
+      }
     }
+    this._updateStateFromStaticLifecycle(props);
+
     // Read state after cWRP in case it calls setState
     const state = this._newState || oldState;
 
@@ -173,8 +208,18 @@ class ReactShallowRenderer {
     }
 
     if (shouldUpdate) {
-      if (typeof this._instance.componentWillUpdate === 'function') {
-        this._instance.componentWillUpdate(props, state, context);
+      // In order to support react-lifecycles-compat polyfilled components,
+      // Unsafe lifecycles should not be invoked for components using the new APIs.
+      if (
+        typeof element.type.getDerivedStateFromProps !== 'function' &&
+        typeof this._instance.getSnapshotBeforeUpdate !== 'function'
+      ) {
+        if (typeof this._instance.componentWillUpdate === 'function') {
+          this._instance.componentWillUpdate(props, state, context);
+        }
+        if (typeof this._instance.UNSAFE_componentWillUpdate === 'function') {
+          this._instance.UNSAFE_componentWillUpdate(props, state, context);
+        }
       }
     }
 
@@ -187,6 +232,24 @@ class ReactShallowRenderer {
     }
     // Intentionally do not call componentDidUpdate()
     // because DOM refs are not available.
+  }
+
+  _updateStateFromStaticLifecycle(props) {
+    const {type} = this._element;
+
+    if (typeof type.getDerivedStateFromProps === 'function') {
+      const partialState = type.getDerivedStateFromProps.call(
+        null,
+        props,
+        this._instance.state,
+      );
+
+      if (partialState != null) {
+        const oldState = this._newState || this._instance.state;
+        const newState = Object.assign({}, oldState, partialState);
+        this._instance.state = this._newState = newState;
+      }
+    }
   }
 }
 
@@ -235,7 +298,16 @@ class Updater {
     const currentState = this._renderer._newState || publicInstance.state;
 
     if (typeof partialState === 'function') {
-      partialState = partialState(currentState, publicInstance.props);
+      partialState = partialState.call(
+        publicInstance,
+        currentState,
+        publicInstance.props,
+      );
+    }
+
+    // Null and undefined are treated as no-ops.
+    if (partialState === null || partialState === undefined) {
+      return;
     }
 
     this._renderer._newState = {

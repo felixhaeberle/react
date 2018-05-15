@@ -7,9 +7,17 @@
 
 import assign from 'object-assign';
 import ReactVersion from 'shared/ReactVersion';
-import {REACT_FRAGMENT_TYPE} from 'shared/ReactSymbols';
+import {
+  REACT_ASYNC_MODE_TYPE,
+  REACT_FRAGMENT_TYPE,
+  REACT_PROFILER_TYPE,
+  REACT_STRICT_MODE_TYPE,
+  REACT_TIMEOUT_TYPE,
+} from 'shared/ReactSymbols';
+import {enableSuspense} from 'shared/ReactFeatureFlags';
 
-import {Component, PureComponent, AsyncComponent} from './ReactBaseClasses';
+import {Component, PureComponent} from './ReactBaseClasses';
+import {createRef} from './ReactCreateRef';
 import {forEach, map, count, toArray, only} from './ReactChildren';
 import ReactCurrentOwner from './ReactCurrentOwner';
 import {
@@ -18,6 +26,8 @@ import {
   cloneElement,
   isValidElement,
 } from './ReactElement';
+import {createContext} from './ReactContext';
+import forwardRef from './forwardRef';
 import {
   createElementWithValidation,
   createFactoryWithValidation,
@@ -34,11 +44,18 @@ const React = {
     only,
   },
 
+  createRef,
   Component,
   PureComponent,
-  unstable_AsyncComponent: AsyncComponent,
+
+  createContext,
+  forwardRef,
 
   Fragment: REACT_FRAGMENT_TYPE,
+  StrictMode: REACT_STRICT_MODE_TYPE,
+  unstable_AsyncMode: REACT_ASYNC_MODE_TYPE,
+  unstable_Profiler: REACT_PROFILER_TYPE,
+  Timeout: REACT_TIMEOUT_TYPE,
 
   createElement: __DEV__ ? createElementWithValidation : createElement,
   cloneElement: __DEV__ ? cloneElementWithValidation : cloneElement,
@@ -53,6 +70,10 @@ const React = {
     assign,
   },
 };
+
+if (enableSuspense) {
+  React.Timeout = REACT_TIMEOUT_TYPE;
+}
 
 if (__DEV__) {
   Object.assign(React.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED, {

@@ -10,6 +10,8 @@ module.exports = {
   'root': true,
 
   plugins: [
+    'jest',
+    'no-for-of-loops',
     'react',
     'react-internal',
   ],
@@ -55,11 +57,25 @@ module.exports = {
     // We don't care to do this
     'react/jsx-wrap-multilines': [ERROR, {declaration: false, assignment: false}],
 
+    // Prevent for...of loops because they require a Symbol polyfill.
+    // You can disable this rule for code that isn't shipped (e.g. build scripts and tests).
+    'no-for-of-loops/no-for-of-loops': ERROR,
+
     // CUSTOM RULES
     // the second argument of warning/invariant should be a literal string
-    'react-internal/warning-and-invariant-args': ERROR,
     'react-internal/no-primitive-constructors': ERROR,
+    'react-internal/warning-and-invariant-args': ERROR,
   },
+
+  overrides: [
+    {
+      files: ['**/__tests__/*.js'],
+      rules: {
+        // https://github.com/jest-community/eslint-plugin-jest
+        'jest/no-focused-tests': ERROR,
+      }
+    }
+  ],
 
   globals: {
     spyOnDev: true,

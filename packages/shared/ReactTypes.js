@@ -5,7 +5,6 @@
  * LICENSE file in the root directory of this source tree.
  *
  * @flow
- * @providesModule ReactTypes
  */
 
 export type ReactNode =
@@ -14,7 +13,9 @@ export type ReactNode =
   | ReactReturn<any>
   | ReactPortal
   | ReactText
-  | ReactFragment;
+  | ReactFragment
+  | ReactProvider<any>
+  | ReactConsumer<any>;
 
 export type ReactFragment = ReactEmpty | Iterable<React$Node>;
 
@@ -47,6 +48,51 @@ export type ReactReturn<V> = {
   },
 };
 
+export type ReactProvider<T> = {
+  $$typeof: Symbol | number,
+  type: ReactProviderType<T>,
+  key: null | string,
+  ref: null,
+  props: {
+    value: T,
+    children?: ReactNodeList,
+  },
+};
+
+export type ReactProviderType<T> = {
+  $$typeof: Symbol | number,
+  _context: ReactContext<T>,
+};
+
+export type ReactConsumer<T> = {
+  $$typeof: Symbol | number,
+  type: ReactContext<T>,
+  key: null | string,
+  ref: null,
+  props: {
+    children: (value: T) => ReactNodeList,
+    unstable_observedBits?: number,
+  },
+};
+
+export type ReactContext<T> = {
+  $$typeof: Symbol | number,
+  Consumer: ReactContext<T>,
+  Provider: ReactProviderType<T>,
+
+  _calculateChangedBits: ((a: T, b: T) => number) | null,
+  _defaultValue: T,
+
+  _currentValue: T,
+  _currentValue2: T,
+  _changedBits: number,
+  _changedBits2: number,
+
+  // DEV only
+  _currentRenderer?: Object | null,
+  _currentRenderer2?: Object | null,
+};
+
 export type ReactPortal = {
   $$typeof: Symbol | number,
   key: null | string,
@@ -55,3 +101,7 @@ export type ReactPortal = {
   // TODO: figure out the API for cross-renderer implementation.
   implementation: any,
 };
+
+export type RefObject = {|
+  current: any,
+|};

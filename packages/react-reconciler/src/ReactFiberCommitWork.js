@@ -9,11 +9,15 @@
 
 import type {HostConfig} from 'react-reconciler';
 import type {Fiber} from './ReactFiber';
+import type {FiberRoot} from './ReactFiber';
+import type {ExpirationTime} from './ReactFiberExpirationTime';
+import type {CapturedValue, CapturedError} from './ReactCapturedValue';
 
 import {
   enableMutatingReconciler,
   enableNoopReconciler,
   enablePersistentReconciler,
+  enableProfilerTimer,
 } from 'shared/ReactFeatureFlags';
 import {
   ClassComponent,
@@ -21,15 +25,25 @@ import {
   HostComponent,
   HostText,
   HostPortal,
-  CallComponent,
+  Profiler,
+  TimeoutComponent,
 } from 'shared/ReactTypeOfWork';
 import ReactErrorUtils from 'shared/ReactErrorUtils';
-import {Placement, Update, ContentReset} from 'shared/ReactTypeOfSideEffect';
+import {
+  ContentReset,
+  Placement,
+  Snapshot,
+  Update,
+} from 'shared/ReactTypeOfSideEffect';
+import {commitUpdateQueue} from './ReactUpdateQueue';
 import invariant from 'fbjs/lib/invariant';
+import warning from 'fbjs/lib/warning';
 
-import {commitCallbacks} from './ReactFiberUpdateQueue';
 import {onCommitUnmount} from './ReactFiberDevToolsHook';
 import {startPhaseTimer, stopPhaseTimer} from './ReactDebugFiberPerf';
+import getComponentName from 'shared/getComponentName';
+import {getStackAddendumByWorkInProgressFiber} from 'shared/ReactFiberComponentTreeHook';
+import {logCapturedError} from './ReactFiberErrorLogger';
 
 const {
   invokeGuardedCallback,
@@ -37,9 +51,61 @@ const {
   clearCaughtError,
 } = ReactErrorUtils;
 
+let didWarnAboutUndefinedSnapshotBeforeUpdate: Set<mixed> | null = null;
+if (__DEV__) {
+  didWarnAboutUndefinedSnapshotBeforeUpdate = new Set();
+}
+
+export function logError(boundary: Fiber, errorInfo: CapturedValue<mixed>) {
+  const source = errorInfo.source;
+  let stack = errorInfo.stack;
+  if (stack === null) {
+    stack = getStackAddendumByWorkInProgressFiber(source);
+  }
+
+  const capturedError: CapturedError = {
+    componentName: source !== null ? getComponentName(source) : null,
+    componentStack: stack !== null ? stack : '',
+    error: errorInfo.value,
+    errorBoundary: null,
+    errorBoundaryName: null,
+    errorBoundaryFound: false,
+    willRetry: false,
+  };
+
+  if (boundary !== null && boundary.tag === ClassComponent) {
+    capturedError.errorBoundary = boundary.stateNode;
+    capturedError.errorBoundaryName = getComponentName(boundary);
+    capturedError.errorBoundaryFound = true;
+    capturedError.willRetry = true;
+  }
+
+  try {
+    logCapturedError(capturedError);
+  } catch (e) {
+    // Prevent cycle if logCapturedError() throws.
+    // A cycle may still occur if logCapturedError renders a component that throws.
+    const suppressLogging = e && e.suppressReactErrorLogging;
+    if (!suppressLogging) {
+      console.error(e);
+    }
+  }
+}
+
 export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
   config: HostConfig<T, P, I, TI, HI, PI, C, CC, CX, PL>,
   captureError: (failedFiber: Fiber, error: mixed) => Fiber | null,
+  scheduleWork: (
+    fiber: Fiber,
+    startTime: ExpirationTime,
+    expirationTime: ExpirationTime,
+  ) => void,
+  computeExpirationForFiber: (
+    startTime: ExpirationTime,
+    fiber: Fiber,
+  ) => ExpirationTime,
+  markLegacyErrorBoundaryAsFailed: (instance: mixed) => void,
+  recalculateCurrentTime: () => ExpirationTime,
 ) {
   const {getPublicInstance, mutation, persistence} = config;
 
@@ -77,23 +143,90 @@ export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
   function safelyDetachRef(current: Fiber) {
     const ref = current.ref;
     if (ref !== null) {
-      if (__DEV__) {
-        invokeGuardedCallback(null, ref, null, null);
-        if (hasCaughtError()) {
-          const refError = clearCaughtError();
-          captureError(current, refError);
+      if (typeof ref === 'function') {
+        if (__DEV__) {
+          invokeGuardedCallback(null, ref, null, null);
+          if (hasCaughtError()) {
+            const refError = clearCaughtError();
+            captureError(current, refError);
+          }
+        } else {
+          try {
+            ref(null);
+          } catch (refError) {
+            captureError(current, refError);
+          }
         }
       } else {
-        try {
-          ref(null);
-        } catch (refError) {
-          captureError(current, refError);
-        }
+        ref.current = null;
       }
     }
   }
 
-  function commitLifeCycles(current: Fiber | null, finishedWork: Fiber): void {
+  function commitBeforeMutationLifeCycles(
+    current: Fiber | null,
+    finishedWork: Fiber,
+  ): void {
+    switch (finishedWork.tag) {
+      case ClassComponent: {
+        if (finishedWork.effectTag & Snapshot) {
+          if (current !== null) {
+            const prevProps = current.memoizedProps;
+            const prevState = current.memoizedState;
+            startPhaseTimer(finishedWork, 'getSnapshotBeforeUpdate');
+            const instance = finishedWork.stateNode;
+            instance.props = finishedWork.memoizedProps;
+            instance.state = finishedWork.memoizedState;
+            const snapshot = instance.getSnapshotBeforeUpdate(
+              prevProps,
+              prevState,
+            );
+            if (__DEV__) {
+              const didWarnSet = ((didWarnAboutUndefinedSnapshotBeforeUpdate: any): Set<
+                mixed,
+              >);
+              if (
+                snapshot === undefined &&
+                !didWarnSet.has(finishedWork.type)
+              ) {
+                didWarnSet.add(finishedWork.type);
+                warning(
+                  false,
+                  '%s.getSnapshotBeforeUpdate(): A snapshot value (or null) ' +
+                    'must be returned. You have returned undefined.',
+                  getComponentName(finishedWork),
+                );
+              }
+            }
+            instance.__reactInternalSnapshotBeforeUpdate = snapshot;
+            stopPhaseTimer();
+          }
+        }
+        return;
+      }
+      case HostRoot:
+      case HostComponent:
+      case HostText:
+      case HostPortal:
+        // Nothing to do for these component types
+        return;
+      default: {
+        invariant(
+          false,
+          'This unit of work tag should not have side-effects. This error is ' +
+            'likely caused by a bug in React. Please file an issue.',
+        );
+      }
+    }
+  }
+
+  function commitLifeCycles(
+    finishedRoot: FiberRoot,
+    current: Fiber | null,
+    finishedWork: Fiber,
+    currentTime: ExpirationTime,
+    committedExpirationTime: ExpirationTime,
+  ): void {
     switch (finishedWork.tag) {
       case ClassComponent: {
         const instance = finishedWork.stateNode;
@@ -110,22 +243,47 @@ export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
             startPhaseTimer(finishedWork, 'componentDidUpdate');
             instance.props = finishedWork.memoizedProps;
             instance.state = finishedWork.memoizedState;
-            instance.componentDidUpdate(prevProps, prevState);
+            instance.componentDidUpdate(
+              prevProps,
+              prevState,
+              instance.__reactInternalSnapshotBeforeUpdate,
+            );
             stopPhaseTimer();
           }
         }
         const updateQueue = finishedWork.updateQueue;
         if (updateQueue !== null) {
-          commitCallbacks(updateQueue, instance);
+          instance.props = finishedWork.memoizedProps;
+          instance.state = finishedWork.memoizedState;
+          commitUpdateQueue(
+            finishedWork,
+            updateQueue,
+            instance,
+            committedExpirationTime,
+          );
         }
         return;
       }
       case HostRoot: {
         const updateQueue = finishedWork.updateQueue;
         if (updateQueue !== null) {
-          const instance =
-            finishedWork.child !== null ? finishedWork.child.stateNode : null;
-          commitCallbacks(updateQueue, instance);
+          let instance = null;
+          if (finishedWork.child !== null) {
+            switch (finishedWork.child.tag) {
+              case HostComponent:
+                instance = getPublicInstance(finishedWork.child.stateNode);
+                break;
+              case ClassComponent:
+                instance = finishedWork.child.stateNode;
+                break;
+            }
+          }
+          commitUpdateQueue(
+            finishedWork,
+            updateQueue,
+            instance,
+            committedExpirationTime,
+          );
         }
         return;
       }
@@ -152,6 +310,14 @@ export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
         // We have no life-cycles associated with portals.
         return;
       }
+      case Profiler: {
+        // We have no life-cycles associated with Profiler.
+        return;
+      }
+      case TimeoutComponent: {
+        // We have no life-cycles associated with Timeouts.
+        return;
+      }
       default: {
         invariant(
           false,
@@ -166,12 +332,30 @@ export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
     const ref = finishedWork.ref;
     if (ref !== null) {
       const instance = finishedWork.stateNode;
+      let instanceToUse;
       switch (finishedWork.tag) {
         case HostComponent:
-          ref(getPublicInstance(instance));
+          instanceToUse = getPublicInstance(instance);
           break;
         default:
-          ref(instance);
+          instanceToUse = instance;
+      }
+      if (typeof ref === 'function') {
+        ref(instanceToUse);
+      } else {
+        if (__DEV__) {
+          if (!ref.hasOwnProperty('current')) {
+            warning(
+              false,
+              'Unexpected ref object provided for %s. ' +
+                'Use either a ref-setter function or React.createRef().%s',
+              getComponentName(finishedWork),
+              getStackAddendumByWorkInProgressFiber(finishedWork),
+            );
+          }
+        }
+
+        ref.current = instanceToUse;
       }
     }
   }
@@ -179,7 +363,11 @@ export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
   function commitDetachRef(current: Fiber) {
     const currentRef = current.ref;
     if (currentRef !== null) {
-      currentRef(null);
+      if (typeof currentRef === 'function') {
+        currentRef(null);
+      } else {
+        currentRef.current = null;
+      }
     }
   }
 
@@ -202,10 +390,6 @@ export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
       }
       case HostComponent: {
         safelyDetachRef(current);
-        return;
-      }
-      case CallComponent: {
-        commitNestedUnmounts(current.stateNode);
         return;
       }
       case HostPortal: {
@@ -330,6 +514,7 @@ export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
           commitContainer(finishedWork);
         },
         commitLifeCycles,
+        commitBeforeMutationLifeCycles,
         commitAttachRef,
         commitDetachRef,
       };
@@ -635,6 +820,25 @@ export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
       case HostRoot: {
         return;
       }
+      case Profiler: {
+        if (enableProfilerTimer) {
+          const onRender = finishedWork.memoizedProps.onRender;
+          onRender(
+            finishedWork.memoizedProps.id,
+            current === null ? 'mount' : 'update',
+            finishedWork.stateNode.duration,
+            finishedWork.treeBaseTime,
+          );
+
+          // Reset actualTime after successful commit.
+          // By default, we append to this time to account for errors and pauses.
+          finishedWork.stateNode.duration = 0;
+        }
+        return;
+      }
+      case TimeoutComponent: {
+        return;
+      }
       default: {
         invariant(
           false,
@@ -651,6 +855,7 @@ export default function<T, P, I, TI, HI, PI, C, CC, CX, PL>(
 
   if (enableMutatingReconciler) {
     return {
+      commitBeforeMutationLifeCycles,
       commitResetTextContent,
       commitPlacement,
       commitDeletion,

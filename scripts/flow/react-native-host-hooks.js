@@ -9,6 +9,11 @@
 
 /* eslint-disable */
 
+import type {
+  ReactNativeBaseComponentViewConfig,
+  ViewConfigGetter,
+} from 'react-native-renderer/src/ReactNativeTypes';
+
 declare module 'deepDiffer' {
   declare module.exports: (one: any, two: any) => boolean;
 }
@@ -81,7 +86,38 @@ declare module 'UIManager' {
       quality?: number,
     },
   ): Promise<any>;
+  declare function setJSResponder(
+    reactTag: number,
+    blockNativeResponder: boolean,
+  ): void;
+  declare function clearJSResponder(): void;
 }
+
+declare module 'FabricUIManager' {
+  declare function createNode(
+    reactTag: number,
+    viewName: string,
+    rootTag: number,
+    props: ?Object,
+    instanceHandle: Object,
+  ): Object;
+  declare function cloneNode(node: Object): Object;
+  declare function cloneNodeWithNewChildren(node: Object): Object;
+  declare function cloneNodeWithNewProps(
+    node: Object,
+    newProps: ?Object,
+  ): Object;
+  declare function cloneNodeWithNewChildrenAndProps(
+    node: Object,
+    newProps: ?Object,
+  ): Object;
+  declare function appendChild(node: Object, childNode: Object): void;
+
+  declare function createChildSet(rootTag: number): Object;
+  declare function appendChildToSet(childSet: Object, childNode: Object): void;
+  declare function completeRoot(rootTag: number, childSet: Object): void;
+}
+
 declare module 'View' {
   declare module.exports: typeof React$Component;
 }
@@ -111,11 +147,11 @@ declare module 'BatchedBridge' {
   declare function registerCallableModule(name: string, module: Object): void;
 }
 
-declare module 'CSComponent' {
-  declare type Element = any;
-  declare type Options<Instance> = any;
-}
+declare module 'ReactNativeViewConfigRegistry' {
+  declare var customBubblingEventTypes: Object;
+  declare var customDirectEventTypes: Object;
+  declare var eventTypes: Object;
 
-declare module 'CSStatefulComponent' {
-  declare function CSStatefulComponent(spec: any): any;
+  declare function register(name: string, callback: ViewConfigGetter): string;
+  declare function get(name: string): ReactNativeBaseComponentViewConfig;
 }
